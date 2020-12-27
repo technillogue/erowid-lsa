@@ -2,6 +2,8 @@ import requests
 import os
 from bs4 import BeautifulSoup
 
+# better: download and extract http://de1.erowid.org/erowid_archives/erowid_mirror_dvd_2012_may_1.iso.bz2
+
 EROWID_BASE_URI = 'https://erowid.org/experiences/exp.php'
 EXP_COUNT = 10000
 
