@@ -1,94 +1,118 @@
-import numpy as np
-import os
-import string
-from nltk.stem.porter import *
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy import sparse
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.feature_extraction.text import TfidfTransformer
-from sklearn.decomposition import NMF, LatentDirichletAllocation, TruncatedSVD
+#!/usr/bin/env -S /usr/bin/python3.8 -m poetry run python
+from collections import Counter
+from typing import List, Tuple, Iterator, Optional
+from pathlib import Path
+from timeit import default_timer
+import pandas as pd
 
-#DEFINE CONSTANTS
-MINIMUM_EXPERIENCE_COUNT = 30
+class Timer:
+    def __init__(self) -> None:
+        self.checkpoints = [default_timer()]
+        print("started timer")
 
-stemmer = PorterStemmer()
+    def checkpoint(self, msg: str) -> None:
+        self.checkpoints.append(default_timer())
+        diff = round(self.checkpoints[-1] - self.checkpoints[-2], 3)
+        print(f"{msg} (elapsed time: {diff}s")
 
-#load stopwords
-stopword_path = 'stopwords_en.txt'
-with open(stopword_path, 'r') as stopwordFile:
-	stopwords = [word.strip() for word in stopwordFile.readlines()]
 
-trainDir = './experiences/'
+timer = Timer()
 
-vectorizer = CountVectorizer(min_df= 1)
-corpus = []
+class ReportFinder:
+    def __init__(self, root: str = "experiences") -> None:
+        self.root = root
+        self.labels: List[str] = []
 
-def print_top_words(model, feature_names, n_top_words):
-    for topic_idx, topic in enumerate(model.components_):
-        print "Topic #%d:" % (topic_idx + 1)
-        print " ".join([feature_names[i]
-                        for i in topic.argsort()[:-n_top_words - 1:-1]]) + '\n'
+    def search(self, limit: Optional[int] = None) -> Iterator[str]:
+        for category in Path(self.root).iterdir():
+            for report in category.iterdir():
+                if report.is_file() and report.stat().st_size > 0:
+                    self.labels.append(category.name)
+                    yield report.absolute().as_posix()
+                if limit and len(self.labels) > limit:
+                    return
 
-#iterate over experiences, treat the data, and add to corpus
-#filter only to read from directories with more than 8 files
-categories = [category for category in os.listdir(trainDir) if len(os.listdir(trainDir + '/' + category)) > MINIMUM_EXPERIENCE_COUNT]
-print categories
-for drug in categories:
-	path = trainDir + drug
-	aggregatedText = ''
+def vectorize_reports(finder: ReportFinder, limit=None) -> Tuple["np.matrix", List[str]]:
+    import numpy as np
+    from sklearn.feature_extraction.text import CountVectorizer
+    from sklearn.feature_extraction.text import TfidfTransformer
+    from zeugma.embeddings import EmbeddingTransformer
 
-	#TODO should just be for experience in os.listdir(path)
-	#but since the scrape failed (I think due to slashes)
-	#we have to make sure it's not one of the ones that messed up
-	for experience in [e for e in os.listdir(path) if not os.path.isdir(e)]:
-		expPath = path + '/' + experience
-		print expPath
-		with open(expPath, 'r') as experienceFile:
-			words = experienceFile.read().strip().split()
+    counter = CountVectorizer(
+        input="filename", decode_error="replace", strip_accents="ascii"
+    )
 
-			#eliminate stopwords, stem the remaining terms
-			editedWords = [word.strip().strip(string.punctuation).lower() for word in words if word.strip().strip(string.punctuation).lower() not in stopwords]
-			editedWords = [stemmer.stem(word) for word in editedWords]
-			aggregatedText += ' '.join(editedWords)
+    reporter = ReportFinder("experiences")
+    weigher = TfidfTransformer()
+    vectorizer = EmbeddingTransformer()
 
-	#have a distinct corpus for each drug
-	corpus.append(aggregatedText)
+    timer.checkpoint("loaded vectorizer")
+    counts = counter.fit_transform(reporter.search(limit))  # shape: (n_reports, n_words)
+    timer.checkpoint(
+        "counted {} experience reports. vocabulary: {} words".format(*counts.shape)
+    )
+    word_weights = weigher.fit_transform(counts)  # shape: (n_reports, n_words)
+    timer.checkpoint("TF-IDF transformed")
+    total_report_weights = word_weights.sum(axis=1)  # shape: (n_reports)
+    words = counter.get_feature_names()  # shape: (n_words)
 
-#fit the corpus
-x = vectorizer.fit_transform(corpus)
-feature_names = vectorizer.get_feature_names()
-countData =  x.toarray()
+    word_vectors: List = vectorizer.transform(words)
+    # shape: (n_words, n_dimensions)
+    timer.checkpoint(f"vectorized words into {len(word_vectors[0])} dimensions")
+    sum_report_vectors = word_weights * word_vectors
+    # shape: (n_reports, n_dimensions)
+    report_vectors = sum_report_vectors / total_report_weights
+    # same shape; not 100% certain that division is necessary
+    timer.checkpoint(
+        "overall report vector mean: {}. overall SD: {}".format(
+            report_vectors.mean(), report_vectors.std()
+        )
+    )
+    df = pd.DataFrame(report_vectors)
+    df["labels"] = reporter.labels
+    return df
 
-#tf_idf transform
-transformer = TfidfTransformer(smooth_idf= False)
-tf_idf = transformer.fit_transform(countData).toarray()
+def scale(report_vectors):
+    if "labels" in report_vectors:
+        labels = report_vectors["labels"]
+        report_vectors = report_vectors.loc[:, report_vectors.columns != "labels"]
+    from sklearn.manifold import MDS
+    scaler = MDS(n_components=2)
+    scaled = scaler.fit_transform(report_vectors)
+    timer.checkpoint("scaled into 2d")
+    df = pd.DataFrame(scaled, columns = ["x", "y"])
+    df["labels"] = labels
+    return df
 
-#perform singular value decomposition
-svd = TruncatedSVD(n_components= 8)
-svdTransform = svd.fit_transform(tf_idf)
-print(svdTransform)
+def plot(df: pd.DataFrame) -> None:
+    from plotnine import ggplot, aes, geom_point
+    from matplotlib import use
 
-#perform non-neg matrix factorization
-nmf = NMF(n_components= 8)
-nmfTransform = nmf.fit_transform(tf_idf)
-print(nmfTransform)
+    fig = (
+        ggplot(df, aes(x="x", y="y", color="collapsed_labels"))
+        + geom_point()
+    )
+    fig.save("experience_report_dissimilarity_by_category.png", width=10, height=10)
+    use("TkAgg")
+    fig.draw()
+    timer.checkpoint("plotted")
 
-print "SVD TOPICS\n-=-=-=-=-=-=-"
-print_top_words(svd, feature_names, 10)
 
-print "NMF TOPICS\n-=-=-=-=-=-=-"
-print_top_words(nmf, feature_names, 10)
+try:
+    report_vectors_2d = pd.read_csv("report_vectors_2d.csv")
+except FileNotFoundError:
+    try:
+        report_vectors = pd.read_csv("report_vectors.csv")
+    except FileExistsError:
+        report_vectors = vectorize_reports(ReportFinder())
+        report_vectors.to_csv("report_vectors.csv")
+    report_vectors_2d = scale(report_vectors)
+    report_vectors_2d.to_csv("report_vectors_2d.csv")
 
-nmf_transform_sparse = sparse.csr_matrix(nmfTransform)
-similarities = cosine_similarity(nmf_transform_sparse)
-
-sortedIndices = np.argsort(similarities, axis= 1)
-
-#the most similar drug will always be itself (which is a good sign!)
-#so must find the SECOND most similar, which will be a different drug
-maximumIndices = sortedIndices[:,-2]
-
-for index, drug in enumerate(categories):
-	print "Drug: " + drug
-	print "Most similar: " + categories[maximumIndices[index]]
-	print "=-=--=-=-=-=-=-=-"
+label_counts = Counter(report_vectors_2d["labels"])
+kept_labels = next(zip(*label_counts.most_common(30)))
+report_vectors_2d["collapsed_labels"] = [
+    label if label in kept_labels else "other" for label in report_vectors_2d["labels"]
+]
+timer.checkpoint("collapsed categories")
+plot(report_vectors_2d)

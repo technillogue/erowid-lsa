@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "erowid-w2v"
+version = "0.1.0"
+description = ""
+authors = ["technillogue <wisepoison@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "3.8.5"
+tensorflow = "^2.4.0"
+sklearn = "^0.0"
+scipy = "^1.5.4"
+scikit-learn = "^0.24.0"
+zeugma = "^0.48"
+matplotlib = "^3.3.3"
+plotnine = "^0.7.1"
+pandas = "^1.2.0"
+
+[tool.poetry.dev-dependencies]
+mypy = "^0.790"
+ipython = "^7.19.0"
+bpython = "^0.20.1"
+pylint = "^2.6.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
